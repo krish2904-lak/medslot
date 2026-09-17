@@ -31,6 +31,19 @@ function toTimeString(totalMinutes) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
 }
 
+function normalizeAppointmentData(appointment, doctors, patients) {
+  if (!appointment) return null
+
+  const doctorName = appointment.doctor_name || doctors.find((doctor) => String(doctor.id) === String(appointment.doctor_id))?.name || 'Unknown doctor'
+  const patientName = appointment.patient_name || patients.find((patient) => String(patient.id) === String(appointment.patient_id))?.name || 'Unknown patient'
+
+  return {
+    ...appointment,
+    doctor_name: doctorName,
+    patient_name: patientName,
+  }
+}
+
 function App() {
   const [auth, setAuth] = useState(() => {
     try {
@@ -357,6 +370,7 @@ function App() {
     const cancelled = appointments.filter((appointment) => appointment.status === 'CANCELLED').length
     const noShow = appointments.filter((appointment) => appointment.status === 'NO_SHOW').length
     const completed = appointments.filter((appointment) => appointment.status === 'COMPLETED').length
+    const unavailable = cancelled + noShow
 
     return {
       todayCount: todayList.length,
@@ -364,9 +378,26 @@ function App() {
       cancelled,
       noShow,
       completed,
+      unavailable,
       slots: slots.length,
     }
   }, [appointments, slots])
+
+  const todayLabel = useMemo(
+    () => new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(new Date()),
+    [],
+  )
+
+  const navItems = [
+    { id: 'dashboard', label: 'Dashboard', icon: '◫' },
+    { id: 'appointments', label: 'Appointments', icon: '📅' },
+    { id: 'doctors', label: 'Doctors', icon: '🩺' },
+    { id: 'patients', label: 'Patients', icon: '👥' },
+    { id: 'doctor-day', label: 'Doctor Day', icon: '🕘' },
+    { id: 'slot-rescue', label: 'Slot Rescue', icon: '⚡' },
+    { id: 'automations', label: 'Automations', icon: '⚙' },
+    { id: 'settings', label: 'Settings', icon: '⋯' },
+  ]
 
   const scheduleRows = [...appointments]
     .filter((appointment) => appointment && appointment.start_time)
@@ -374,6 +405,23 @@ function App() {
     .slice(0, 8)
 
   const selectedDoctor = doctors.find((doctor) => String(doctor.id) === String(selectedDoctorId)) || doctors[0]
+
+  const doctorCards = useMemo(() => {
+    return doctors.map((doctor) => {
+      const planned = appointments.filter((appointment) => appointment.doctor_name === doctor.name && new Date(appointment.start_time).toISOString().slice(0, 10) === todayIso)
+      const booked = planned.filter((appointment) => appointment.status !== 'CANCELLED').length
+      const utilization = Math.min(100, Math.round((booked / Math.max(1, booked + Math.max(1, slots.length || 3))) * 100))
+      const available = Math.max(0, Math.min(12, 12 - booked))
+
+      return {
+        ...doctor,
+        booked,
+        available,
+        utilization,
+        status: booked >= 8 ? 'Busy' : booked >= 5 ? 'Steady' : 'Open',
+      }
+    })
+  }, [appointments, doctors, slots])
 
   const rescueSlot = useMemo(() => {
     if (!selectedDoctor || !slots.length) return null
@@ -449,17 +497,23 @@ function App() {
   }
 
   const openReschedule = (appointment) => {
-    if (!appointment) return
+    if (!appointment) {
+      setSelectedAppointment(null)
+      setRescheduleOpen(true)
+      setRescheduleAlert('')
+      return
+    }
 
-    const start = new Date(appointment.start_time)
-    const end = new Date(appointment.end_time)
+    const normalizedAppointment = normalizeAppointmentData(appointment, doctors, patients)
+    const start = normalizedAppointment && normalizedAppointment.start_time ? new Date(normalizedAppointment.start_time) : null
+    const end = normalizedAppointment && normalizedAppointment.end_time ? new Date(normalizedAppointment.end_time) : null
 
-    setSelectedAppointment(appointment)
+    setSelectedAppointment(normalizedAppointment)
     setRescheduleOpen(true)
     setRescheduleForm({
-      date: start.toISOString().slice(0, 10),
-      startTime: start.toTimeString().slice(0, 5),
-      endTime: end.toTimeString().slice(0, 5),
+      date: start ? start.toISOString().slice(0, 10) : todayIso,
+      startTime: start ? start.toTimeString().slice(0, 5) : '09:00',
+      endTime: end ? end.toTimeString().slice(0, 5) : '09:30',
     })
     setRescheduleAlert('')
   }
@@ -510,19 +564,25 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">Clinic Operations Command Center</p>
-          <h1>MEDISLOT</h1>
+        <div className="brand-block">
+          <div className="brand-mark">M</div>
+          <div>
+            <p className="eyebrow">Clinic Operations</p>
+            <h1>MEDISLOT</h1>
+          </div>
         </div>
 
-        <div className="header-actions">
-          <button type="button" className="ghost-button" onClick={seedDemoData} disabled={loading || !token}>Load Demo Data</button>
-          {auth?.user ? (
-            <div className="user-pill">
-              <span>{auth.user.name}</span>
-              <button type="button" onClick={() => { setAuth(null); showToast('You have been logged out.') }}>Logout</button>
-            </div>
-          ) : null}
+        <div className="header-meta">
+          <div className="date-chip">{todayLabel}</div>
+          <div className="header-actions">
+            <button type="button" className="ghost-button" onClick={seedDemoData} disabled={loading || !token}>Load Demo Data</button>
+            {auth?.user ? (
+              <div className="user-pill">
+                <span>{auth.user.name}</span>
+                <button type="button" onClick={() => { setAuth(null); showToast('You have been logged out.') }}>Logout</button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -570,45 +630,53 @@ function App() {
         <main className="dashboard-shell">
           <aside className="sidebar panel">
             <div className="nav-title">Overview</div>
-            {[
-              { id: 'dashboard', label: 'Dashboard' },
-              { id: 'appointments', label: 'Appointments' },
-              { id: 'doctors', label: 'Doctors' },
-              { id: 'patients', label: 'Patients' },
-              { id: 'doctor-day', label: 'Doctor Day' },
-            ].map((item) => (
+            {navItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 className={`nav-button ${activeView === item.id ? 'active' : ''}`}
                 onClick={() => setActiveView(item.id)}
               >
+                <span className="nav-icon">{item.icon}</span>
                 {item.label}
               </button>
             ))}
           </aside>
 
           <div className="main-panel">
+            <section className="hero-panel panel">
+              <div className="hero-copy-row">
+                <div>
+                  <p className="eyebrow accent">Good afternoon, Clinic Staff</p>
+                  <h2>Here's what's happening at your clinic today.</h2>
+                </div>
+                <div className="status-chip">
+                  <span className="status-dot" />
+                  System status: Operational
+                </div>
+              </div>
+            </section>
+
             <section className="stats-grid">
               <article className="stat-card">
-                <span>Today's Appointments</span>
+                <div className="stat-topline"><span className="stat-icon">🗓</span><span>Today's Appointments</span></div>
                 <strong>{stats.todayCount}</strong>
+                <small>{stats.confirmed} confirmed today</small>
               </article>
               <article className="stat-card">
-                <span>Available Slots</span>
+                <div className="stat-topline"><span className="stat-icon">✅</span><span>Confirmed</span></div>
+                <strong>{stats.confirmed}</strong>
+                <small>Patient flow stable</small>
+              </article>
+              <article className="stat-card">
+                <div className="stat-topline"><span className="stat-icon">🩺</span><span>Available Slots</span></div>
                 <strong>{stats.slots}</strong>
+                <small>Ready for booking</small>
               </article>
               <article className="stat-card">
-                <span>Completed</span>
-                <strong>{stats.completed}</strong>
-              </article>
-              <article className="stat-card">
-                <span>No-Shows</span>
-                <strong>{stats.noShow}</strong>
-              </article>
-              <article className="stat-card accent-card">
-                <span>Live Status</span>
-                <strong>Online</strong>
+                <div className="stat-topline"><span className="stat-icon">⏳</span><span>Cancelled / No-show</span></div>
+                <strong>{stats.unavailable}</strong>
+                <small>{stats.cancelled} cancelled · {stats.noShow} no-show</small>
               </article>
             </section>
 
@@ -667,6 +735,51 @@ function App() {
               )}
             </section>
 
+            <section className="panel section-box availability-panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow accent">DOCTOR AVAILABILITY</p>
+                  <h3>Clinic coverage</h3>
+                </div>
+              </div>
+              <div className="doctor-grid">
+                {doctorCards.map((doctor) => (
+                  <div key={doctor.id} className="doctor-card">
+                    <div className="doctor-card-head">
+                      <div>
+                        <h4>{doctor.name}</h4>
+                        <p>{doctor.specialization || 'General practice'}</p>
+                      </div>
+                      <span className={`mini-tag ${doctor.status === 'Busy' ? 'busy' : doctor.status === 'Steady' ? 'steady' : 'open'}`}>{doctor.status}</span>
+                    </div>
+                    <div className="doctor-times">
+                      <span>{doctor.start_time || '09:00'} - {doctor.end_time || '17:00'}</span>
+                    </div>
+                    <div className="doctor-metrics">
+                      <div><strong>{doctor.booked}</strong><span>Booked</span></div>
+                      <div><strong>{doctor.available}</strong><span>Available</span></div>
+                    </div>
+                    <div className="progress-bar"><span style={{ width: `${doctor.utilization}%` }} /></div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel section-box action-panel">
+              <div className="section-header compact-header">
+                <div>
+                  <p className="eyebrow accent">QUICK ACTIONS</p>
+                  <h3>Front desk tools</h3>
+                </div>
+              </div>
+              <div className="action-grid">
+                <button type="button" className="action-button primary" onClick={() => setActiveView('appointments')}>+ Book Appointment</button>
+                <button type="button" className="action-button" onClick={() => { if (appointments[0]) openReschedule(appointments[0]); else showToast('No appointment to reschedule yet.') }}>↻ Reschedule</button>
+                <button type="button" className="action-button" onClick={() => setActiveView('doctor-day')}>🕘 Doctor Day</button>
+                <button type="button" className="action-button" onClick={handleSlotRescue}>⚡ Slot Rescue</button>
+              </div>
+            </section>
+
             {rescueSlot && (
               <section className="panel section-box rescue-box">
                 <div className="rescue-head">
@@ -710,7 +823,7 @@ function App() {
                   </thead>
                   <tbody>
                     {scheduleRows.length === 0 ? (
-                      <tr><td colSpan="5" className="empty-row">No appointments scheduled today.</td></tr>
+                      <tr><td colSpan="5" className="empty-row"><span className="calendar-empty">📅</span> No appointments scheduled today.</td></tr>
                     ) : (
                       scheduleRows.map((appointment) => (
                         <tr key={appointment.id} onClick={() => setSelectedAppointment(appointment)} className={selectedAppointment?.id === appointment.id ? 'selected-row' : ''}>
@@ -731,6 +844,38 @@ function App() {
                     )}
                   </tbody>
                 </table>
+              </div>
+            </section>
+
+            <section className="panel section-box activity-panel">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow accent">CLINIC ACTIVITY</p>
+                  <h3>Operations summary</h3>
+                </div>
+              </div>
+
+              <div className="activity-grid">
+                <article className="activity-card">
+                  <span className="activity-label">Confirmed</span>
+                  <strong>{stats.confirmed}</strong>
+                  <small>Active bookings</small>
+                </article>
+                <article className="activity-card">
+                  <span className="activity-label">Cancelled</span>
+                  <strong>{stats.cancelled}</strong>
+                  <small>Released slots</small>
+                </article>
+                <article className="activity-card">
+                  <span className="activity-label">Available</span>
+                  <strong>{stats.slots}</strong>
+                  <small>Open this date</small>
+                </article>
+                <article className="activity-card accent">
+                  <span className="activity-label">Status</span>
+                  <strong>{selectedAppointment ? 'Selected' : 'Live'}</strong>
+                  <small>{selectedAppointment ? selectedAppointment.patient_name : 'Operations running'}</small>
+                </article>
               </div>
             </section>
 
@@ -846,78 +991,91 @@ function App() {
         </main>
       )}
 
-      {rescheduleOpen && selectedAppointment && (
+      {rescheduleOpen && (
         <div className="modal-overlay" onClick={() => setRescheduleOpen(false)}>
           <div className="modal-card" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
               <div>
                 <p className="eyebrow accent">SMART RESCHEDULE</p>
-                <h3>Move appointment</h3>
+                <h3>{selectedAppointment ? 'Move appointment' : 'No appointment selected'}</h3>
               </div>
               <button type="button" className="close-button" onClick={() => setRescheduleOpen(false)}>×</button>
             </div>
 
-            <div className="reschedule-summary">
-              <div>
-                <span className="meta-label">Patient</span>
-                <strong>{selectedAppointment.patient_name}</strong>
-              </div>
-              <div>
-                <span className="meta-label">Doctor</span>
-                <strong>{selectedAppointment.doctor_name}</strong>
-              </div>
-              <div>
-                <span className="meta-label">Current</span>
-                <strong>{new Date(selectedAppointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – {new Date(selectedAppointment.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong>
-              </div>
-            </div>
-
-            <form onSubmit={onRescheduleSubmit} className="stacked-form modal-form">
-              <div className="inline-fields two-up">
-                <label>
-                  New date
-                  <input type="date" value={rescheduleForm.date} onChange={(event) => setRescheduleForm((current) => ({ ...current, date: event.target.value }))} />
-                </label>
-              </div>
-
-              <div className="inline-fields two-up">
-                <label>
-                  New start
-                  <input type="time" value={rescheduleForm.startTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, startTime: event.target.value }))} />
-                </label>
-                <label>
-                  New end
-                  <input type="time" value={rescheduleForm.endTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, endTime: event.target.value }))} />
-                </label>
-              </div>
-
-              {selectionSuggestions.length > 0 && (
-                <div className="suggestion-box">
-                  <div className="suggestion-header">Suggested slots</div>
-                  <div className="slot-grid small-grid">
-                    {selectionSuggestions.map((slot) => (
-                      <button
-                        key={slot}
-                        type="button"
-                        className="slot-pill"
-                        onClick={() => {
-                          const slotMinutes = getClockMinutes(slot)
-                          const endMinutes = slotMinutes + 30
-                          const endTime = toTimeString(endMinutes)
-                          setRescheduleForm((current) => ({ ...current, startTime: slot, endTime }))
-                        }}
-                      >
-                        {slot}
-                      </button>
-                    ))}
+            {selectedAppointment ? (
+              <>
+                <div className="reschedule-summary">
+                  <div>
+                    <span className="meta-label">Patient</span>
+                    <strong>{selectedAppointment.patient_name || 'No patient selected'}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Doctor</span>
+                    <strong>{selectedAppointment.doctor_name || 'No doctor selected'}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Current</span>
+                    <strong>
+                      {selectedAppointment.start_time && selectedAppointment.end_time
+                        ? `${new Date(selectedAppointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – ${new Date(selectedAppointment.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                        : 'No appointment time'}
+                    </strong>
                   </div>
                 </div>
-              )}
 
-              {rescheduleAlert && <div className="alert-box">{rescheduleAlert}</div>}
+                <form onSubmit={onRescheduleSubmit} className="stacked-form modal-form">
+                  <div className="inline-fields two-up">
+                    <label>
+                      New date
+                      <input type="date" value={rescheduleForm.date} onChange={(event) => setRescheduleForm((current) => ({ ...current, date: event.target.value }))} />
+                    </label>
+                  </div>
 
-              <button type="submit" disabled={loading}>Confirm Reschedule</button>
-            </form>
+                  <div className="inline-fields two-up">
+                    <label>
+                      New start
+                      <input type="time" value={rescheduleForm.startTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, startTime: event.target.value }))} />
+                    </label>
+                    <label>
+                      New end
+                      <input type="time" value={rescheduleForm.endTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, endTime: event.target.value }))} />
+                    </label>
+                  </div>
+
+                  {selectionSuggestions.length > 0 && (
+                    <div className="suggestion-box">
+                      <div className="suggestion-header">Suggested slots</div>
+                      <div className="slot-grid small-grid">
+                        {selectionSuggestions.map((slot) => (
+                          <button
+                            key={slot}
+                            type="button"
+                            className="slot-pill"
+                            onClick={() => {
+                              const slotMinutes = getClockMinutes(slot)
+                              const endMinutes = slotMinutes + 30
+                              const endTime = toTimeString(endMinutes)
+                              setRescheduleForm((current) => ({ ...current, startTime: slot, endTime }))
+                            }}
+                          >
+                            {slot}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {rescheduleAlert && <div className="alert-box">{rescheduleAlert}</div>}
+
+                  <button type="submit" disabled={loading}>Confirm Reschedule</button>
+                </form>
+              </>
+            ) : (
+              <div className="empty-state">
+                <p>No appointment is selected for rescheduling.</p>
+                <button type="button" className="secondary" onClick={() => setRescheduleOpen(false)} disabled={loading}>Close</button>
+              </div>
+            )}
           </div>
         </div>
       )}
