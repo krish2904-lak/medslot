@@ -18,6 +18,19 @@ function isoSlot(date, time) {
   return `${date}T${time}:00`
 }
 
+function getClockMinutes(value) {
+  if (!value) return 0
+  const [hours, minutes] = String(value).split(':').map(Number)
+  return (hours || 0) * 60 + (minutes || 0)
+}
+
+function toTimeString(totalMinutes) {
+  const safe = ((totalMinutes % (24 * 60)) + (24 * 60)) % (24 * 60)
+  const hours = Math.floor(safe / 60)
+  const minutes = safe % 60
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+}
+
 function App() {
   const [auth, setAuth] = useState(() => {
     try {
@@ -41,21 +54,6 @@ function App() {
     email: 'staff@example.com',
     password: 'secret123',
   })
-  const [doctorForm, setDoctorForm] = useState({
-    name: 'Dr. Ananya Sharma',
-    specialization: 'General Medicine',
-    start_time: '09:00',
-    end_time: '17:00',
-    break_start: '12:00',
-    break_end: '12:30',
-    appointment_duration: 30,
-    buffer_minutes: 15,
-  })
-  const [patientForm, setPatientForm] = useState({
-    name: 'Rahul Verma',
-    phone: '9876543210',
-    email: 'rahul@example.com',
-  })
   const [bookingForm, setBookingForm] = useState({
     doctorId: '',
     patientId: '',
@@ -63,11 +61,24 @@ function App() {
     startTime: '09:00',
     endTime: '09:30',
   })
+  const [selectedAppointment, setSelectedAppointment] = useState(null)
+  const [rescheduleOpen, setRescheduleOpen] = useState(false)
+  const [rescheduleForm, setRescheduleForm] = useState({
+    date: todayIso,
+    startTime: '09:00',
+    endTime: '09:30',
+  })
+  const [rescheduleAlert, setRescheduleAlert] = useState('')
+  const [notificationResult, setNotificationResult] = useState(null)
+  const [automationResult, setAutomationResult] = useState(null)
 
   const token = auth?.token
 
   const request = async (path, options = {}, authToken = token) => {
-    const response = await fetch(path, {
+    const isApiPath = typeof path === 'string' && path.startsWith('/api')
+    const requestUrl = isApiPath ? `http://localhost:5000${path}` : path
+
+    const response = await fetch(requestUrl, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
@@ -77,24 +88,37 @@ function App() {
       body: options.body ? JSON.stringify(options.body) : undefined,
     })
 
+    const contentType = response.headers.get('content-type') || ''
     const text = await response.text()
-    const data = text ? JSON.parse(text) : {}
+    const data = text && contentType.includes('application/json') ? JSON.parse(text) : {}
 
     if (!response.ok) {
-      throw new Error(data?.message || 'Request failed')
+      const fallbackMessage = text && !contentType.includes('application/json') ? text.slice(0, 200) : data?.message
+      throw new Error(fallbackMessage || 'Request failed')
+    }
+
+    if (text && !contentType.includes('application/json')) {
+      throw new Error('Expected JSON response from backend but received an HTML page.')
     }
 
     return data
+  }
+
+  const showToast = (text) => {
+    setMessage(text)
+    window.clearTimeout(showToast.timeout)
+    showToast.timeout = window.setTimeout(() => setMessage(''), 3500)
   }
 
   const refreshDashboard = async (authToken = token) => {
     if (!authToken) return
 
     try {
+      const dateParam = bookingForm.date || todayIso
       const [doctorData, patientData, appointmentData] = await Promise.all([
         request('/api/doctors', {}, authToken),
         request('/api/patients', {}, authToken),
-        request('/api/appointments?limit=50&sort=start_time&order=asc', {}, authToken),
+        request(`/api/appointments?limit=200&sort=start_time&order=asc`, {}, authToken),
       ])
 
       const nextDoctors = doctorData.doctors || []
@@ -105,18 +129,13 @@ function App() {
       setPatients(nextPatients)
       setAppointments(nextAppointments)
 
-      if (!selectedDoctorId && nextDoctors.length > 0) {
-        const firstDoctorId = String(nextDoctors[0].id)
-        setSelectedDoctorId(firstDoctorId)
-        setBookingForm((current) => ({ ...current, doctorId: firstDoctorId }))
-      }
-
-      if (selectedDoctorId) {
-        const slotData = await request(`/api/doctors/${selectedDoctorId}/available-slots?date=${bookingForm.date}`)
+      const activeDoctorId = selectedDoctorId || (nextDoctors[0]?.id ? String(nextDoctors[0].id) : '')
+      if (activeDoctorId) {
+        const slotData = await request(`/api/doctors/${activeDoctorId}/available-slots?date=${dateParam}`, {}, authToken)
         setSlots(slotData.slots || [])
       }
     } catch (error) {
-      setMessage(error.message)
+      showToast(error.message)
     }
   }
 
@@ -134,7 +153,7 @@ function App() {
 
     const loadAvailability = async () => {
       try {
-        const slotData = await request(`/api/doctors/${selectedDoctorId}/available-slots?date=${bookingForm.date}`)
+        const slotData = await request(`/api/doctors/${selectedDoctorId}/available-slots?date=${bookingForm.date || todayIso}`)
         setSlots(slotData.slots || [])
       } catch {
         setSlots([])
@@ -196,51 +215,10 @@ function App() {
 
       const nextAuth = { token: result.token, user: result.user }
       setAuth(nextAuth)
-      setMessage(`Welcome back, ${result.user?.name || 'Clinic Staff'}!`)
+      showToast(`Welcome back, ${result.user?.name || 'Clinic Staff'}!`)
       await refreshDashboard(result.token)
     } catch (error) {
-      setMessage(error.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const createDoctor = async (event) => {
-    event.preventDefault()
-    setLoading(true)
-    try {
-      const response = await request('/api/doctors', {
-        method: 'POST',
-        body: doctorForm,
-      })
-
-      setDoctors((current) => [...current, response.doctor])
-      setSelectedDoctorId(String(response.doctor.id))
-      setBookingForm((current) => ({ ...current, doctorId: String(response.doctor.id) }))
-      setMessage(`Doctor ${response.doctor.name} added.`)
-      await refreshDashboard()
-    } catch (error) {
-      setMessage(error.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const createPatient = async (event) => {
-    event.preventDefault()
-    setLoading(true)
-    try {
-      const response = await request('/api/patients', {
-        method: 'POST',
-        body: patientForm,
-      })
-
-      setPatients((current) => [response.patient, ...current])
-      setBookingForm((current) => ({ ...current, patientId: String(response.patient.id) }))
-      setMessage(`Patient ${response.patient.name} saved.`)
-      await refreshDashboard()
-    } catch (error) {
-      setMessage(error.message)
+      showToast(error.message)
     } finally {
       setLoading(false)
     }
@@ -249,6 +227,7 @@ function App() {
   const createAppointment = async (event) => {
     event.preventDefault()
     setLoading(true)
+
     try {
       const payload = {
         doctor_id: Number(bookingForm.doctorId),
@@ -262,12 +241,12 @@ function App() {
         body: payload,
       })
 
-      setMessage(`Appointment booked for ${response.appointment.patient_name}.`)
+      setSelectedAppointment(response.appointment)
+      showToast(`✓ Appointment booked for ${response.appointment.patient_name}.`)
       await refreshDashboard()
       setBookingForm((current) => ({ ...current, startTime: '09:00', endTime: '09:30' }))
     } catch (error) {
-      const messageText = error.message || 'Scheduling conflict.'
-      setMessage(messageText)
+      showToast(error.message || 'Scheduling conflict.')
     } finally {
       setLoading(false)
     }
@@ -280,10 +259,10 @@ function App() {
         body: { reason: 'Patient requested cancellation' },
       })
 
-      setMessage(`Cancelled appointment. Fee: ₹${response.fee || 0}`)
+      showToast(`Cancelled appointment. Fee: ₹${response.fee || 0}`)
       await refreshDashboard()
     } catch (error) {
-      setMessage(error.message)
+      showToast(error.message)
     }
   }
 
@@ -292,27 +271,21 @@ function App() {
 
     setLoading(true)
     try {
-      let doctorList = []
-      try {
-        doctorList = (await request('/api/doctors')).doctors || []
-      } catch {
-        doctorList = []
-      }
-
+      const doctorList = (await request('/api/doctors', {}, token)).doctors || []
       if (!doctorList.length) {
-        const doctorsToCreate = [
+        const doctorSeeds = [
           { name: 'Dr. Ananya Sharma', specialization: 'General Medicine', start_time: '09:00', end_time: '17:00', break_start: '12:00', break_end: '12:30', appointment_duration: 30, buffer_minutes: 15 },
           { name: 'Dr. Raj Mehta', specialization: 'Cardiology', start_time: '09:00', end_time: '17:00', break_start: '12:00', break_end: '12:30', appointment_duration: 30, buffer_minutes: 15 },
           { name: 'Dr. Neha Kapoor', specialization: 'Dermatology', start_time: '10:00', end_time: '18:00', break_start: '14:00', break_end: '14:30', appointment_duration: 30, buffer_minutes: 10 },
         ]
 
         const createdDoctors = []
-        for (const doctor of doctorsToCreate) {
-          const result = await request('/api/doctors', { method: 'POST', body: doctor })
+        for (const doctor of doctorSeeds) {
+          const result = await request('/api/doctors', { method: 'POST', body: doctor }, token)
           createdDoctors.push(result.doctor)
         }
 
-        const patientsToCreate = [
+        const patientSeeds = [
           { name: 'Rahul Verma', phone: '9000000001', email: 'rahul@example.com' },
           { name: 'Priya Sharma', phone: '9000000002', email: 'priya@example.com' },
           { name: 'Amit Singh', phone: '9000000003', email: 'amit@example.com' },
@@ -321,8 +294,8 @@ function App() {
         ]
 
         const createdPatients = []
-        for (const patient of patientsToCreate) {
-          const result = await request('/api/patients', { method: 'POST', body: patient })
+        for (const patient of patientSeeds) {
+          const result = await request('/api/patients', { method: 'POST', body: patient }, token)
           createdPatients.push(result.patient)
         }
 
@@ -343,7 +316,7 @@ function App() {
               start_time: isoSlot(todayIso, seed.start),
               end_time: isoSlot(todayIso, seed.end),
             },
-          })
+          }, token)
         }
 
         const cancelled = await request('/api/appointments', {
@@ -354,36 +327,43 @@ function App() {
             start_time: isoSlot(todayIso, '11:30'),
             end_time: isoSlot(todayIso, '12:00'),
           },
-        })
+        }, token)
 
         await request(`/api/appointments/${cancelled.appointment.id}/cancel`, {
           method: 'POST',
           body: { reason: 'Clinic schedule change' },
-        })
+        }, token)
 
         setSelectedDoctorId(String(createdDoctors[0].id))
-        setBookingForm((current) => ({ ...current, doctorId: String(createdDoctors[0].id), patientId: String(createdPatients[0].id) }))
+        setBookingForm((current) => ({
+          ...current,
+          doctorId: String(createdDoctors[0].id),
+          patientId: String(createdPatients[0].id),
+        }))
       }
 
       await refreshDashboard()
-      setMessage('Demo data loaded successfully.')
+      showToast('Demo data loaded successfully.')
     } catch (error) {
-      setMessage(error.message)
+      showToast(error.message)
     } finally {
       setLoading(false)
     }
   }
 
   const stats = useMemo(() => {
+    const todayList = appointments.filter((appointment) => new Date(appointment.start_time).toISOString().slice(0, 10) === todayIso)
     const confirmed = appointments.filter((appointment) => appointment.status === 'CONFIRMED').length
     const cancelled = appointments.filter((appointment) => appointment.status === 'CANCELLED').length
-    const lateFeeTotal = appointments.reduce((total, appointment) => total + Number(appointment.cancellation_fee || 0), 0)
+    const noShow = appointments.filter((appointment) => appointment.status === 'NO_SHOW').length
+    const completed = appointments.filter((appointment) => appointment.status === 'COMPLETED').length
 
     return {
+      todayCount: todayList.length,
       confirmed,
       cancelled,
-      fee: lateFeeTotal,
-      todayCount: appointments.length,
+      noShow,
+      completed,
       slots: slots.length,
     }
   }, [appointments, slots])
@@ -393,51 +373,173 @@ function App() {
     .sort((a, b) => new Date(a.start_time) - new Date(b.start_time))
     .slice(0, 8)
 
-  const searchMatch = patients.find((patient) => patient.name.toLowerCase().includes(searchTerm.toLowerCase()))
+  const selectedDoctor = doctors.find((doctor) => String(doctor.id) === String(selectedDoctorId)) || doctors[0]
 
-  const logout = () => {
-    setAuth(null)
-    setMessage('You have been logged out.')
+  const rescueSlot = useMemo(() => {
+    if (!selectedDoctor || !slots.length) return null
+    const slot = slots[0]
+    const startMinutes = getClockMinutes(slot)
+    const endMinutes = startMinutes + 30
+
+    return {
+      doctorId: selectedDoctor.id,
+      doctorName: selectedDoctor.name,
+      start: slot,
+      end: toTimeString(endMinutes),
+      startIso: `${bookingForm.date || todayIso}T${slot}:00`,
+      endIso: `${bookingForm.date || todayIso}T${toTimeString(endMinutes)}:00`,
+    }
+  }, [bookingForm.date, selectedDoctor, slots])
+
+  const handleSlotRescue = async () => {
+    if (!rescueSlot || !patients.length) {
+      showToast('No rescue slot available right now.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      await request('/api/appointments', {
+        method: 'POST',
+        body: {
+          doctor_id: Number(rescueSlot.doctorId),
+          patient_id: Number(patients[0].id),
+          start_time: rescueSlot.startIso,
+          end_time: rescueSlot.endIso,
+        },
+      })
+
+      showToast('✓ Slot rescued successfully')
+      await refreshDashboard()
+    } catch (error) {
+      showToast(error.message)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  const selectedDoctor = doctors.find((doctor) => String(doctor.id) === String(selectedDoctorId)) || doctors[0]
-  const doctorDay = appointments.filter((appointment) => String(appointment.doctor_id) === String(selectedDoctor?.id || ''))
+  const runMorningReminders = async () => {
+    if (!token) return
+    setLoading(true)
+    try {
+      const result = await request('/api/notifications/clock', { method: 'POST', body: {} })
+      setNotificationResult(result)
+      showToast(`✓ Morning notification job completed. ${result.generated || 0} reminders generated.`)
+      await refreshDashboard()
+    } catch (error) {
+      showToast(error.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const runNoShowAutomation = async () => {
+    if (!token) return
+    setLoading(true)
+    try {
+      const result = await request('/api/automation/clock', { method: 'POST', body: {} })
+      setAutomationResult(result)
+      showToast(`✓ Automation completed. ${result.changed?.length || 0} appointment(s) updated.`)
+      await refreshDashboard()
+    } catch (error) {
+      showToast(error.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const openReschedule = (appointment) => {
+    if (!appointment) return
+
+    const start = new Date(appointment.start_time)
+    const end = new Date(appointment.end_time)
+
+    setSelectedAppointment(appointment)
+    setRescheduleOpen(true)
+    setRescheduleForm({
+      date: start.toISOString().slice(0, 10),
+      startTime: start.toTimeString().slice(0, 5),
+      endTime: end.toTimeString().slice(0, 5),
+    })
+    setRescheduleAlert('')
+  }
+
+  const onRescheduleSubmit = async (event) => {
+    event.preventDefault()
+    if (!selectedAppointment) return
+
+    const nextStart = `${rescheduleForm.date}T${rescheduleForm.startTime}:00`
+    const nextEnd = `${rescheduleForm.date}T${rescheduleForm.endTime}:00`
+
+    if (new Date(nextEnd) <= new Date(nextStart)) {
+      setRescheduleAlert('Please choose an end time later than the start time.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const response = await request(`/api/appointments/${selectedAppointment.id}/reschedule`, {
+        method: 'POST',
+        body: {
+          new_start_time: nextStart,
+          new_end_time: nextEnd,
+        },
+      })
+
+      setRescheduleOpen(false)
+      setSelectedAppointment(response.appointment)
+      showToast(`✓ Appointment rescheduled for ${response.appointment.patient_name}.`)
+      await refreshDashboard()
+    } catch (error) {
+      const message = error.message || 'Scheduling conflict — this doctor is already booked.'
+      if (/conflict|already booked|overlap/i.test(message)) {
+        setRescheduleAlert('⚠ Scheduling conflict: this doctor is already booked during that window.')
+      } else {
+        setRescheduleAlert(message)
+      }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const selectionSuggestions = useMemo(() => {
+    if (!slots.length) return []
+    return slots.slice(0, 5)
+  }, [slots])
 
   return (
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <p className="eyebrow">Front Desk Command Center</p>
-          <h1>MediSlot</h1>
+          <p className="eyebrow">Clinic Operations Command Center</p>
+          <h1>MEDISLOT</h1>
         </div>
-        {auth?.user ? (
-          <div className="user-chip">
-            <span>{auth.user.name}</span>
-            <button type="button" onClick={logout}>Logout</button>
-          </div>
-        ) : null}
+
+        <div className="header-actions">
+          <button type="button" className="ghost-button" onClick={seedDemoData} disabled={loading || !token}>Load Demo Data</button>
+          {auth?.user ? (
+            <div className="user-pill">
+              <span>{auth.user.name}</span>
+              <button type="button" onClick={() => { setAuth(null); showToast('You have been logged out.') }}>Logout</button>
+            </div>
+          ) : null}
+        </div>
       </header>
 
       {!auth?.token ? (
         <main className="auth-layout">
           <section className="panel hero-panel">
-            <p className="eyebrow accent">Zero conflicts. Fair cancellations. Smarter clinic days.</p>
-            <h2>Built for front-desk teams.</h2>
-            <p>
-              MediSlot helps clinics keep schedules clean, cancellations fair, and patient flow predictable.
+            <p className="eyebrow accent">Runtime-ready clinic intelligence</p>
+            <h2>MEDISLOT</h2>
+            <p className="hero-copy">
+              Real-time scheduling, conflict-free operations, and patient flow visibility for modern clinics.
             </p>
-            <div className="hero-grid">
-              <div>
-                <strong>Problem</strong>
-                <span>Overbooked clinics and payment confusion slow care teams down.</span>
-              </div>
-              <div>
-                <strong>Solution</strong>
-                <span>Real-time doctor availability, clear conflict rules, and fast rescheduling.</span>
-              </div>
-            </div>
-            <div className="cta-row">
-              <button type="button" onClick={() => setLoginForm({ email: 'staff@example.com', password: 'secret123' })}>Get Started</button>
+
+            <div className="status-row">
+              <span className="status-indicator online">● API Connected</span>
+              <span className="status-indicator online">● Scheduling Engine Operational</span>
+              <span className="status-indicator online">● Notification Service Ready</span>
+              <span className="status-indicator online">● Automation Ready</span>
             </div>
           </section>
 
@@ -467,14 +569,13 @@ function App() {
       ) : (
         <main className="dashboard-shell">
           <aside className="sidebar panel">
-            <div className="nav-title">Navigation</div>
+            <div className="nav-title">Overview</div>
             {[
               { id: 'dashboard', label: 'Dashboard' },
               { id: 'appointments', label: 'Appointments' },
               { id: 'doctors', label: 'Doctors' },
               { id: 'patients', label: 'Patients' },
               { id: 'doctor-day', label: 'Doctor Day' },
-              { id: 'slot-rescue', label: 'Slot Rescue' },
             ].map((item) => (
               <button
                 key={item.id}
@@ -485,7 +586,6 @@ function App() {
                 {item.label}
               </button>
             ))}
-            <button type="button" className="nav-button logout-button" onClick={logout}>Logout</button>
           </aside>
 
           <div className="main-panel">
@@ -495,289 +595,232 @@ function App() {
                 <strong>{stats.todayCount}</strong>
               </article>
               <article className="stat-card">
-                <span>Confirmed</span>
-                <strong>{stats.confirmed}</strong>
-              </article>
-              <article className="stat-card">
                 <span>Available Slots</span>
-                <strong>{slots.length}</strong>
+                <strong>{stats.slots}</strong>
               </article>
               <article className="stat-card">
-                <span>Cancelled</span>
-                <strong>{stats.cancelled}</strong>
+                <span>Completed</span>
+                <strong>{stats.completed}</strong>
+              </article>
+              <article className="stat-card">
+                <span>No-Shows</span>
+                <strong>{stats.noShow}</strong>
               </article>
               <article className="stat-card accent-card">
-                <span>Late Cancellation Fees</span>
-                <strong>₹{stats.fee}</strong>
+                <span>Live Status</span>
+                <strong>Online</strong>
               </article>
             </section>
 
-            {activeView === 'dashboard' && (
-              <>
-                <section className="panel section-box">
-                  <div className="section-header">
-                    <h3>TODAY'S SCHEDULE</h3>
-                    <button type="button" onClick={seedDemoData}>Load Demo Data</button>
+            <section className="panel section-box twist-panel">
+              <div className="section-header compact-header">
+                <div>
+                  <p className="eyebrow accent">⚡ TWIST ROUND AUTOMATION</p>
+                  <h3>Smart workflows that keep clinic operations conflict-free.</h3>
+                </div>
+              </div>
+
+              <div className="twist-grid">
+                <article className="twist-card">
+                  <div className="twist-icon">🧠</div>
+                  <h4>Smart Reschedule</h4>
+                  <p>Move an appointment without creating conflicts.</p>
+                  <button type="button" onClick={() => { if (appointments[0]) openReschedule(appointments[0]); else showToast('No appointment to reschedule yet.'); }}>
+                    Reschedule
+                  </button>
+                </article>
+
+                <article className="twist-card">
+                  <div className="twist-icon">🔔</div>
+                  <h4>Morning Reminders</h4>
+                  <p>Generate today's appointment notifications.</p>
+                  <button type="button" className="secondary" onClick={runMorningReminders}>Run Morning Reminders</button>
+                </article>
+
+                <article className="twist-card">
+                  <div className="twist-icon">⏱</div>
+                  <h4>No-Show Automation</h4>
+                  <p>Automatically handle incomplete appointments 30 minutes after start.</p>
+                  <button type="button" className="secondary" onClick={runNoShowAutomation}>Run No-Show Clock</button>
+                </article>
+
+                <article className="twist-card accent-twist">
+                  <div className="twist-icon">⚡</div>
+                  <h4>Slot Rescue</h4>
+                  <p>Release canceled time and turn it into a fast conversion opportunity.</p>
+                  <button type="button" onClick={handleSlotRescue}>Book This Slot</button>
+                </article>
+              </div>
+
+              {notificationResult && (
+                <div className="twist-result">
+                  <strong>✓ Morning notification job completed</strong>
+                  <span>{notificationResult.generated || 0} reminders generated</span>
+                </div>
+              )}
+
+              {automationResult && (
+                <div className="twist-result warning">
+                  <strong>✓ Automation completed</strong>
+                  <span>{automationResult.changed?.length || 0} appointment(s) updated</span>
+                </div>
+              )}
+            </section>
+
+            {rescueSlot && (
+              <section className="panel section-box rescue-box">
+                <div className="rescue-head">
+                  <div>
+                    <p className="eyebrow accent">⚡ SLOT RESCUE</p>
+                    <h3>{rescueSlot.doctorName}</h3>
                   </div>
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Time</th>
-                          <th>Patient</th>
-                          <th>Doctor</th>
-                          <th>Status</th>
-                          <th>Action</th>
+                  <button type="button" className="mini-button success" onClick={handleSlotRescue}>Book This Slot</button>
+                </div>
+                <div className="rescue-meta">
+                  <div>
+                    <span className="meta-label">Time</span>
+                    <strong>{rescueSlot.start} – {rescueSlot.end}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Reason</span>
+                    <strong>Released after cancellation</strong>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            <section className="panel section-box">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow accent">TODAY'S SCHEDULE</p>
+                  <h3>Today's appointments</h3>
+                </div>
+              </div>
+
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Patient</th>
+                      <th>Doctor</th>
+                      <th>Status</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleRows.length === 0 ? (
+                      <tr><td colSpan="5" className="empty-row">No appointments scheduled today.</td></tr>
+                    ) : (
+                      scheduleRows.map((appointment) => (
+                        <tr key={appointment.id} onClick={() => setSelectedAppointment(appointment)} className={selectedAppointment?.id === appointment.id ? 'selected-row' : ''}>
+                          <td>{new Date(appointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
+                          <td>{appointment.patient_name}</td>
+                          <td>{appointment.doctor_name}</td>
+                          <td><span className={`status-badge ${String(appointment.status).toLowerCase()}`}>{appointment.status === 'NO_SHOW' ? 'NO_SHOW' : appointment.status}</span></td>
+                          <td>
+                            <div className="row-actions">
+                              <button type="button" className="mini-button" onClick={(event) => { event.stopPropagation(); openReschedule(appointment) }}>Reschedule</button>
+                              {appointment.status === 'CONFIRMED' && (
+                                <button type="button" className="mini-button danger" onClick={(event) => { event.stopPropagation(); cancelAppointment(appointment.id) }}>Cancel</button>
+                              )}
+                            </div>
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {scheduleRows.length === 0 ? (
-                          <tr><td colSpan="5">No appointments yet.</td></tr>
-                        ) : (
-                          scheduleRows.map((appointment) => (
-                            <tr key={appointment.id}>
-                              <td>{new Date(appointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
-                              <td>{appointment.patient_name || '—'}</td>
-                              <td>{appointment.doctor_name || '—'}</td>
-                              <td><span className={`status-badge ${appointment.status.toLowerCase()}`}>{appointment.status}</span></td>
-                              <td>
-                                {appointment.status === 'CONFIRMED' ? (
-                                  <button type="button" className="mini-button danger" onClick={() => cancelAppointment(appointment.id)}>Cancel</button>
-                                ) : (
-                                  <span className="muted">—</span>
-                                )}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            {selectedAppointment && (
+              <section className="panel section-box detail-panel">
+                <div className="section-header">
+                  <div>
+                    <p className="eyebrow accent">APPOINTMENT</p>
+                    <h3>{selectedAppointment.patient_name}</h3>
                   </div>
-                </section>
-
-                <section className="panel section-box rescue-box">
-                  <div className="rescue-head">
-                    <div>
-                      <div className="eyebrow accent">⚡ SLOT RESCUE</div>
-                      <h3>Dr. Ananya Sharma has an unexpected 11:30 AM opening.</h3>
-                    </div>
-                    <button type="button" className="mini-button success">Book this slot</button>
+                </div>
+                <div className="detail-grid">
+                  <div>
+                    <span className="meta-label">Doctor</span>
+                    <strong>{selectedAppointment.doctor_name}</strong>
                   </div>
-                  <p>Created after a cancellation.</p>
-                </section>
-              </>
-            )}
+                  <div>
+                    <span className="meta-label">Time</span>
+                    <strong>{new Date(selectedAppointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – {new Date(selectedAppointment.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Date</span>
+                    <strong>{new Date(selectedAppointment.start_time).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}</strong>
+                  </div>
+                  <div>
+                    <span className="meta-label">Status</span>
+                    <strong>{selectedAppointment.status}</strong>
+                  </div>
+                </div>
 
-            {activeView === 'appointments' && (
-              <section className="panel section-box">
-                <div className="section-header">
-                  <h3>APPOINTMENTS TABLE</h3>
-                </div>
-                <div className="toolbar">
-                  <input
-                    type="search"
-                    placeholder="Search patient or doctor"
-                    value={searchTerm}
-                    onChange={(event) => setSearchTerm(event.target.value)}
-                  />
-                </div>
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Patient</th>
-                        <th>Doctor</th>
-                        <th>Date</th>
-                        <th>Time</th>
-                        <th>Status</th>
-                        <th>Fee</th>
-                        <th>Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {appointments.length === 0 ? (
-                        <tr><td colSpan="7">No appointments yet.</td></tr>
-                      ) : (
-                        appointments.map((appointment) => (
-                          <tr key={appointment.id}>
-                            <td>{appointment.patient_name}</td>
-                            <td>{appointment.doctor_name}</td>
-                            <td>{new Date(appointment.start_time).toLocaleDateString()}</td>
-                            <td>{new Date(appointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
-                            <td><span className={`status-badge ${appointment.status.toLowerCase()}`}>{appointment.status}</span></td>
-                            <td>₹{appointment.cancellation_fee || 0}</td>
-                            <td>
-                              {appointment.status === 'CONFIRMED' ? (
-                                <button type="button" className="mini-button danger" onClick={() => cancelAppointment(appointment.id)}>Cancel</button>
-                              ) : <span className="muted">Cancelled</span>}
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            )}
-
-            {activeView === 'doctors' && (
-              <section className="panel section-box">
-                <div className="section-header">
-                  <h3>Doctors</h3>
-                </div>
-                <div className="stacked-list">
-                  {doctors.map((doctor) => (
-                    <div key={doctor.id} className="row-card">
-                      <div>
-                        <strong>{doctor.name}</strong>
-                        <p>{doctor.specialization}</p>
-                      </div>
-                      <span>{doctor.start_time}–{doctor.end_time}</span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {activeView === 'patients' && (
-              <section className="panel section-box">
-                <div className="section-header">
-                  <h3>Patients</h3>
-                </div>
-                <div className="toolbar">
-                  <input
-                    type="search"
-                    placeholder="Search Rahul"
-                    value={searchTerm}
-                    onChange={(event) => setSearchTerm(event.target.value)}
-                  />
-                </div>
-                <div className="stacked-list">
-                  {(searchResults.length ? searchResults : patients).slice(0, 6).map((patient) => {
-                    const patientAppointments = appointments.filter((appointment) => Number(appointment.patient_id) === Number(patient.id))
-                    const upcoming = patientAppointments.find((appointment) => appointment.status === 'CONFIRMED')
-
-                    return (
-                      <div key={patient.id} className="row-card patient-card">
-                        <div>
-                          <strong>{patient.name}</strong>
-                          <p>{patient.phone}</p>
-                          <small>{upcoming ? `Upcoming: ${formatDate(upcoming.start_time)}` : 'No upcoming appointment'}</small>
-                        </div>
-                        <div className="chip-stack">
-                          <span className="mini-tag">{patientAppointments.length} visits</span>
-                          {upcoming && <span className="mini-tag success">Upcoming</span>}
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </section>
-            )}
-
-            {activeView === 'doctor-day' && (
-              <section className="panel section-box">
-                <div className="section-header">
-                  <h3>{selectedDoctor ? `Dr. ${selectedDoctor.name}` : 'Doctor day'}</h3>
-                </div>
-                <div className="day-view list-wrap">
-                  {selectedDoctor ? (
-                    <>
-                      <div className="doctor-header-row">
-                        <strong>{selectedDoctor.name}</strong>
-                        <span>{todayIso}</span>
-                      </div>
-                      {[{ time: '09:00', label: 'Rahul Verma', status: 'CONFIRMED' }, { time: '09:30', label: 'Priya Sharma', status: 'CONFIRMED' }, { time: '10:00', label: 'AVAILABLE', status: 'AVAILABLE' }, { time: '10:30', label: 'Amit Singh', status: 'CONFIRMED' }, { time: '11:00', label: 'AVAILABLE', status: 'AVAILABLE' }, { time: '13:00', label: 'BREAK', status: 'BREAK' }, { time: '14:00', label: 'Rohan Gupta', status: 'CONFIRMED' }].map((row) => (
-                        <div key={row.time} className="day-row">
-                          <span>{row.time}</span>
-                          <strong>{row.label}</strong>
-                          <span className={`status-badge ${row.status.toLowerCase()}`}>{row.status}</span>
-                        </div>
-                      ))}
-                    </>
-                  ) : (
-                    <p>No doctor selected.</p>
-                  )}
-                </div>
-              </section>
-            )}
-
-            {activeView === 'slot-rescue' && (
-              <section className="panel section-box">
-                <div className="section-header">
-                  <h3>Slot Rescue</h3>
-                </div>
-                <div className="rescue-panel">
-                  <div className="eyebrow accent">⚡ SLOT RESCUE</div>
-                  <h4>Dr. Ananya Sharma has an unexpected 11:30 AM opening.</h4>
-                  <p>Created after a cancellation.</p>
-                  <button type="button" onClick={() => setActiveView('dashboard')}>Book this slot</button>
+                <div className="timeline">
+                  <div className="timeline-item positive">✓ Appointment booked</div>
+                  {selectedAppointment.status === 'NO_SHOW' && <div className="timeline-item negative">○ No-show evaluation</div>}
+                  {selectedAppointment.status === 'CANCELLED' && <div className="timeline-item negative">× Appointment cancelled</div>}
+                  {selectedAppointment.status === 'CONFIRMED' && <div className="timeline-item neutral">○ Reminder</div>}
                 </div>
               </section>
             )}
 
             <section className="panel section-box booking-box">
               <div className="section-header">
-                <h3>Book an appointment</h3>
+                <h3>Book an Appointment</h3>
               </div>
+
               <form onSubmit={createAppointment} className="stacked-form compact-form">
-                <label>
-                  Doctor
-                  <select
-                    value={bookingForm.doctorId}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      setBookingForm((current) => ({ ...current, doctorId: value }))
-                      setSelectedDoctorId(value)
-                    }}
-                  >
-                    <option value="">Select doctor</option>
-                    {doctors.map((doctor) => (<option key={doctor.id} value={doctor.id}>{doctor.name}</option>))}
-                  </select>
-                </label>
-                <label>
-                  Patient
-                  <select
-                    value={bookingForm.patientId}
-                    onChange={(event) => setBookingForm({ ...bookingForm, patientId: event.target.value })}
-                  >
-                    <option value="">Select patient</option>
-                    {patients.map((patient) => (<option key={patient.id} value={patient.id}>{patient.name}</option>))}
-                  </select>
-                </label>
+                <div className="inline-fields two-up">
+                  <label>
+                    Doctor
+                    <select value={bookingForm.doctorId} onChange={(event) => { const value = event.target.value; setBookingForm((current) => ({ ...current, doctorId: value })); setSelectedDoctorId(value) }}>
+                      <option value="">Select doctor</option>
+                      {doctors.map((doctor) => (
+                        <option key={doctor.id} value={doctor.id}>{doctor.name}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label>
+                    Patient
+                    <select value={bookingForm.patientId} onChange={(event) => setBookingForm((current) => ({ ...current, patientId: event.target.value }))}>
+                      <option value="">Select patient</option>
+                      {patients.map((patient) => (
+                        <option key={patient.id} value={patient.id}>{patient.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
                 <div className="inline-fields two-up">
                   <label>
                     Date
-                    <input
-                      type="date"
-                      value={bookingForm.date}
-                      onChange={(event) => setBookingForm({ ...bookingForm, date: event.target.value })}
-                    />
+                    <input type="date" value={bookingForm.date} onChange={(event) => setBookingForm((current) => ({ ...current, date: event.target.value }))} />
                   </label>
                 </div>
+
                 <div className="inline-fields two-up">
                   <label>
                     Start
-                    <input
-                      type="time"
-                      value={bookingForm.startTime}
-                      onChange={(event) => setBookingForm({ ...bookingForm, startTime: event.target.value })}
-                    />
+                    <input type="time" value={bookingForm.startTime} onChange={(event) => setBookingForm((current) => ({ ...current, startTime: event.target.value }))} />
                   </label>
                   <label>
                     End
-                    <input
-                      type="time"
-                      value={bookingForm.endTime}
-                      onChange={(event) => setBookingForm({ ...bookingForm, endTime: event.target.value })}
-                    />
+                    <input type="time" value={bookingForm.endTime} onChange={(event) => setBookingForm((current) => ({ ...current, endTime: event.target.value }))} />
                   </label>
                 </div>
-                <button type="submit" disabled={loading}>Book visit</button>
+
+                <button type="submit" disabled={loading}>Book Visit</button>
               </form>
 
               <div className="slots-panel">
-                <h4>Available slots</h4>
+                <h4>Available Slots</h4>
                 {slots.length === 0 ? <p className="empty-state small">No open slots on this date.</p> : (
                   <div className="slot-grid">
                     {slots.map((slot) => (
@@ -785,7 +828,12 @@ function App() {
                         key={slot}
                         type="button"
                         className="slot-pill"
-                        onClick={() => setBookingForm((current) => ({ ...current, startTime: slot, endTime: slot }))}
+                        onClick={() => {
+                          const slotMinutes = getClockMinutes(slot)
+                          const endMinutes = slotMinutes + 30
+                          const endTime = toTimeString(endMinutes)
+                          setBookingForm((current) => ({ ...current, startTime: slot, endTime }))
+                        }}
                       >
                         {slot}
                       </button>
@@ -796,6 +844,82 @@ function App() {
             </section>
           </div>
         </main>
+      )}
+
+      {rescheduleOpen && selectedAppointment && (
+        <div className="modal-overlay" onClick={() => setRescheduleOpen(false)}>
+          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow accent">SMART RESCHEDULE</p>
+                <h3>Move appointment</h3>
+              </div>
+              <button type="button" className="close-button" onClick={() => setRescheduleOpen(false)}>×</button>
+            </div>
+
+            <div className="reschedule-summary">
+              <div>
+                <span className="meta-label">Patient</span>
+                <strong>{selectedAppointment.patient_name}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Doctor</span>
+                <strong>{selectedAppointment.doctor_name}</strong>
+              </div>
+              <div>
+                <span className="meta-label">Current</span>
+                <strong>{new Date(selectedAppointment.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – {new Date(selectedAppointment.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</strong>
+              </div>
+            </div>
+
+            <form onSubmit={onRescheduleSubmit} className="stacked-form modal-form">
+              <div className="inline-fields two-up">
+                <label>
+                  New date
+                  <input type="date" value={rescheduleForm.date} onChange={(event) => setRescheduleForm((current) => ({ ...current, date: event.target.value }))} />
+                </label>
+              </div>
+
+              <div className="inline-fields two-up">
+                <label>
+                  New start
+                  <input type="time" value={rescheduleForm.startTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, startTime: event.target.value }))} />
+                </label>
+                <label>
+                  New end
+                  <input type="time" value={rescheduleForm.endTime} onChange={(event) => setRescheduleForm((current) => ({ ...current, endTime: event.target.value }))} />
+                </label>
+              </div>
+
+              {selectionSuggestions.length > 0 && (
+                <div className="suggestion-box">
+                  <div className="suggestion-header">Suggested slots</div>
+                  <div className="slot-grid small-grid">
+                    {selectionSuggestions.map((slot) => (
+                      <button
+                        key={slot}
+                        type="button"
+                        className="slot-pill"
+                        onClick={() => {
+                          const slotMinutes = getClockMinutes(slot)
+                          const endMinutes = slotMinutes + 30
+                          const endTime = toTimeString(endMinutes)
+                          setRescheduleForm((current) => ({ ...current, startTime: slot, endTime }))
+                        }}
+                      >
+                        {slot}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {rescheduleAlert && <div className="alert-box">{rescheduleAlert}</div>}
+
+              <button type="submit" disabled={loading}>Confirm Reschedule</button>
+            </form>
+          </div>
+        </div>
       )}
 
       {message ? <div className="toast">{message}</div> : null}

@@ -17,7 +17,10 @@ const {
   updateAppointment,
   cancelAppointment,
   rescheduleAppointment,
-  getAvailability
+  getAvailability,
+  triggerNotificationClock,
+  getNotifications,
+  triggerAutomationClock
 } = require('../controllers/clinicController');
 
 const router = express.Router();
@@ -41,5 +44,9 @@ router.get('/appointments/:id', authenticate, getAppointmentById);
 router.patch('/appointments/:id', authenticate, updateAppointment);
 router.post('/appointments/:id/cancel', authenticate, cancelAppointment);
 router.post('/appointments/:id/reschedule', authenticate, rescheduleAppointment);
+
+router.get('/notifications', authenticate, getNotifications);
+router.post('/notifications/clock', authenticate, triggerNotificationClock);
+router.post('/automation/clock', authenticate, triggerAutomationClock);
 
 module.exports = router;

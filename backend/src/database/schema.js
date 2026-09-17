@@ -54,8 +54,23 @@ db.exec(`
     FOREIGN KEY (patient_id) REFERENCES patients(id)
   );
 
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    appointment_id INTEGER,
+    notification_type TEXT NOT NULL DEFAULT 'morning_reminder',
+    sent_date TEXT,
+    title TEXT,
+    message TEXT NOT NULL,
+    payload_json TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (appointment_id) REFERENCES appointments(id)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_appointments_doctor_time
   ON appointments(doctor_id, start_time, end_time);
+
+  CREATE INDEX IF NOT EXISTS idx_notifications_appointment
+  ON notifications(appointment_id, notification_type, sent_date);
 
   CREATE INDEX IF NOT EXISTS idx_patients_name
   ON patients(name);

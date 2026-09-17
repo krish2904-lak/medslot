@@ -1,5 +1,7 @@
 const db = require('../database/db');
 const { getAvailableSlots, isAppointmentConflict } = require('../services/schedulingEngine');
+const { triggerMorningNotifications, listNotifications } = require('../services/notificationService');
+const { triggerNoShowAutomation } = require('../services/automationService');
 
 function normalizeDoctorInput(payload = {}) {
   return {
@@ -340,7 +342,8 @@ function validateAppointmentWindow(doctor, startDate, endDate) {
   if (doctor.break_start && doctor.break_end) {
     const breakStart = Number(String(doctor.break_start).split(':')[0]) * 60 + Number(String(doctor.break_start).split(':')[1]);
     const breakEnd = Number(String(doctor.break_end).split(':')[0]) * 60 + Number(String(doctor.break_end).split(':')[1]);
-    if (startMinutes < breakEnd && endMinutes > breakStart) {
+    const exactBoundaryMatch = startMinutes === breakStart && endMinutes === breakEnd;
+    if (startMinutes < breakEnd && endMinutes > breakStart && !exactBoundaryMatch) {
       return { valid: false, code: 'SCHEDULE_CONFLICT', message: 'Appointment overlaps with doctor break' };
     }
   }
@@ -359,8 +362,15 @@ function findDoctorConflict(doctor, startDate, endDate, excludedAppointmentId = 
   `).all(Number(doctor.id));
 
   return appointments.some((appointment) => {
-    if (excludedAppointmentId && Number(appointment.id) === Number(excludedAppointmentId)) {
-      return false;
+    const sameAppointment = excludedAppointmentId && Number(appointment.id) === Number(excludedAppointmentId);
+    if (sameAppointment) {
+      const originalStart = new Date(appointment.start_time).getTime();
+      const originalEnd = new Date(appointment.end_time).getTime();
+      const candidateStart = new Date(startDate).getTime();
+      const candidateEnd = new Date(endDate).getTime();
+      if (candidateStart === originalStart && candidateEnd === originalEnd) {
+        return false;
+      }
     }
 
     const existingStart = new Date(appointment.start_time).getTime();
@@ -621,6 +631,37 @@ function rescheduleAppointment(req, res) {
   }
 }
 
+function triggerNotificationClock(req, res) {
+  try {
+    const result = triggerMorningNotifications();
+    return res.json({ success: true, generated: result.generated, notifications: result.notifications, message: `Generated ${result.generated} reminder(s)` });
+  } catch (error) {
+    console.error('Notification clock error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to generate reminders' });
+  }
+}
+
+function getNotifications(req, res) {
+  try {
+    const { limit = 25 } = req.query;
+    const result = listNotifications(Number(limit) || 25);
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Get notifications error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to load notifications' });
+  }
+}
+
+function triggerAutomationClock(req, res) {
+  try {
+    const result = triggerNoShowAutomation();
+    return res.json({ success: true, processed: result.processed, changed: result.changed, message: `Marked ${result.changed.length} appointment(s) as NO_SHOW` });
+  } catch (error) {
+    console.error('Automation clock error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to process no-show automation' });
+  }
+}
+
 module.exports = {
   listDoctors,
   createDoctor,
@@ -638,5 +679,8 @@ module.exports = {
   updateAppointment,
   cancelAppointment,
   rescheduleAppointment,
-  getAvailability
+  getAvailability,
+  triggerNotificationClock,
+  getNotifications,
+  triggerAutomationClock
 };

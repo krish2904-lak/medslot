@@ -11,8 +11,11 @@ let appointmentId;
 
 async function apiFetch(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
 
@@ -256,6 +259,151 @@ test('cancelled appointment does not block slot', async () => {
   assert.equal(cancel.status, 200);
   assert.equal(slot.status, 200);
   assert.ok(slot.data.slots.includes('10:00'));
+});
+
+test('reschedule updates the same appointment and preserves doctor/patient', async () => {
+  const patient7 = await apiFetch('/api/patients', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: { name: 'Olivia Hart', phone: '9876543216', email: 'olivia@example.com' }
+  });
+
+  const newAppointment = await apiFetch('/api/appointments', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      doctor_id: doctorId,
+      patient_id: patient7.data.patient.id,
+      start_time: '2026-09-19T11:00:00',
+      end_time: '2026-09-19T11:30:00'
+    }
+  });
+
+  const reschedule = await apiFetch(`/api/appointments/${newAppointment.data.appointment.id}/reschedule`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      new_start_time: '2026-09-19T12:00:00',
+      new_end_time: '2026-09-19T12:30:00'
+    }
+  });
+
+  assert.equal(reschedule.status, 200);
+  assert.equal(reschedule.data.appointment.doctor_id, doctorId);
+  assert.equal(reschedule.data.appointment.patient_id, patient7.data.patient.id);
+  assert.equal(reschedule.data.appointment.start_time.slice(11, 16), '12:00');
+});
+
+test('reschedule rejects overlapping time conflicts', async () => {
+  const patient8 = await apiFetch('/api/patients', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: { name: 'Ava Stone', phone: '9876543217', email: 'ava@example.com' }
+  });
+
+  const create = await apiFetch('/api/appointments', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      doctor_id: doctorId,
+      patient_id: patient8.data.patient.id,
+      start_time: '2026-09-20T15:00:00',
+      end_time: '2026-09-20T15:30:00'
+    }
+  });
+
+  const conflicting = await apiFetch(`/api/appointments/${create.data.appointment.id}/reschedule`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      new_start_time: '2026-09-20T15:15:00',
+      new_end_time: '2026-09-20T15:45:00'
+    }
+  });
+
+  assert.equal(conflicting.status, 409);
+  assert.equal(conflicting.data.code, 'SCHEDULE_CONFLICT');
+});
+
+test('notification clock creates reminders for today appointments', async () => {
+  const patient9 = await apiFetch('/api/patients', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: { name: 'Mila Ross', phone: '9876543218', email: 'mila@example.com' }
+  });
+
+  const reminderDate = new Date();
+  reminderDate.setHours(15, 0, 0, 0);
+
+  const newAppointment = await apiFetch('/api/appointments', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      doctor_id: doctorId,
+      patient_id: patient9.data.patient.id,
+      start_time: reminderDate.toISOString(),
+      end_time: new Date(reminderDate.getTime() + 30 * 60 * 1000).toISOString()
+    }
+  });
+
+  const notification = await apiFetch('/api/notifications/clock', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {}
+  });
+
+  assert.equal(notification.status, 200);
+  assert.equal(notification.data.success, true);
+  assert.ok(notification.data.generated >= 1);
+  assert.ok(notification.data.notifications.some((item) => item.appointment_id === newAppointment.data.appointment.id));
+});
+
+test('automation clock marks stale appointments as NO_SHOW', async () => {
+  const staleDoctor = await apiFetch('/api/doctors', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      name: 'Dr. Gray',
+      specialization: 'Dermatology',
+      start_time: '09:00',
+      end_time: '17:00',
+      break_start: '12:00',
+      break_end: '12:30',
+      appointment_duration: 30,
+      buffer_minutes: 0
+    }
+  });
+
+  const patient10 = await apiFetch('/api/patients', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: { name: 'Liam Fox', phone: '9876543219', email: 'liam@example.com' }
+  });
+
+  const staleStart = new Date(Date.now() - 90 * 60 * 1000);
+  const staleEnd = new Date(Date.now() - 60 * 60 * 1000);
+
+  const stale = await apiFetch('/api/appointments', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      doctor_id: staleDoctor.data.doctor.id,
+      patient_id: patient10.data.patient.id,
+      start_time: staleStart.toISOString(),
+      end_time: staleEnd.toISOString()
+    }
+  });
+
+  const result = await apiFetch('/api/automation/clock', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: {}
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.data.success, true);
+  assert.ok(result.data.processed >= 1);
+  assert.ok(result.data.changed.some((item) => Number(item.id) === Number(stale.data.appointment.id)));
 });
 
 test('break restriction is enforced', async () => {
